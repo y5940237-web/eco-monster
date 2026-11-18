@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import "leaflet/dist/leaflet.css";
 import type { Map as LeafletMap, LayerGroup } from "leaflet";
-import { distanceM, Point } from "./lib/geo";
+import { distanceM, type Point } from "./lib/geo";
 
 type Spot = Point & { id: string; name: string; note: string; custom?: boolean };
 type Route = { meters: number; coords: [number, number][] };
@@ -40,7 +40,11 @@ export default function Hotspots() {
   const layers = useRef<LayerGroup | null>(null);
   const leaflet = useRef<typeof import("leaflet") | null>(null);
   const pickingRef = useRef(false);
-  pickingRef.current = picking;
+
+  // Keep the ref in sync after each render (not during it)
+  useEffect(() => {
+    pickingRef.current = picking;
+  }, [picking]);
 
   const allSpots = useMemo(() => [...SAMPLE_SPOTS, ...custom], [custom]);
 
@@ -154,7 +158,7 @@ export default function Hotspots() {
         if (!r) throw new Error("no route");
         setRoute({
           meters: r.distance,
-          coords: r.geometry.coordinates.map(([lng, lat]: [number, number]) => [lat, lng]),
+          coords: r.geometry.coordinates.map(([lng, lat]: [number, number]) => [lat, lng] as [number, number]),
         });
       })
       .catch((e) => {
@@ -199,7 +203,7 @@ export default function Hotspots() {
     setRouteMsg("");
   }
 
-  function useMyLocationForForm() {
+  function setFormToMyLocation() {
     if (me) return setForm((f) => ({ ...f, point: me }));
     navigator.geolocation.getCurrentPosition(
       (p) => {
@@ -253,7 +257,7 @@ export default function Hotspots() {
           <input placeholder="What's there? e.g. bottles near the benches" value={form.note}
             onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))} aria-label="Note" />
           <div className="row">
-            <button className="btn alt" onClick={useMyLocationForForm}>Use my location</button>
+            <button className="btn alt" onClick={setFormToMyLocation}>Use my location</button>
             <button className="btn alt" onClick={() => setPicking(true)}>Pick on map</button>
           </div>
           <p className="muted" role="status">

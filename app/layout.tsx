@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Fredoka } from "next/font/google";
+// @ts-ignore - Next.js handles global CSS imports.
 import "./globals.css";
 
 const fredoka = Fredoka({ subsets: ["latin"], weight: ["400", "500", "600", "700"] });
