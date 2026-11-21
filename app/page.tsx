@@ -27,6 +27,18 @@ function stageFor(xp: number): number {
   return i;
 }
 
+// Shrink a photo to max 1024px and turn it into base64 text,
+// so it uploads quickly and stays under Vercel's upload size limit
+async function toSmallJpeg(file: File): Promise<string> {
+  const img = await createImageBitmap(file);
+  const scale = Math.min(1, 1024 / Math.max(img.width, img.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(img.width * scale);
+  canvas.height = Math.round(img.height * scale);
+  canvas.getContext("2d")?.drawImage(img, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/jpeg", 0.8).split(",")[1];
+}
+
 // Button that lets the person choose: open the camera or pick a file
 function PhotoButton({ label, busy, onFile }: { label: string; busy: boolean; onFile: (f: File) => void }) {
   const [open, setOpen] = useState(false);
@@ -116,6 +128,7 @@ export default function Home() {
   const [steps, setSteps] = useState<string>("");
   const [busy, setBusy] = useState<boolean>(false);
   const [loaded, setLoaded] = useState<boolean>(false);
+  const [notice, setNotice] = useState<string>(""); // message after the AI checks a photo
 
   // GPS walk tracking
   const [tracking, setTracking] = useState<boolean>(false);
@@ -148,16 +161,39 @@ export default function Home() {
 
   async function analyse(kind: Kind, file: File) {
     setBusy(true);
-    const res = await fetch("/api/analyze", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind }), // later: also send the photo
-    });
-    const data = await res.json();
-    setBusy(false);
-    if (kind === "litter") earn(data.count * XP.litter, `Cleaned ${data.count} × ${data.type}`);
-    if (kind === "refund")
-      earn(Math.round(data.amount * XP.refundPerDollar), `Recycled, refund $${data.amount.toFixed(2)}`);
+    setNotice("");
+    try {
+      const image = await toSmallJpeg(file);
+      const res = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind, image }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+
+      // The AI said no, so no XP
+      if (!data.accepted) {
+        setNotice(`🚫 Not accepted: ${data.reason}`);
+        return;
+      }
+
+      if (kind === "litter") {
+        const count = Math.min(Math.max(Number(data.count) || 1, 1), 10); // 1 to 10, stops cheating
+        earn(count * XP.litter, `Spotted ${count} × ${data.type ?? "litter"}`);
+        setNotice(`✅ ${data.reason}`);
+      }
+      if (kind === "refund") {
+        const amount = Math.min(Math.max(Number(data.amount) || 0, 0), 20); // cap unrealistic amounts
+        earn(Math.round(amount * XP.refundPerDollar), `Recycled, refund $${amount.toFixed(2)}`);
+        setNotice(`✅ ${data.reason}`);
+      }
+    } catch (err) {
+      console.error(err);
+      setNotice("Couldn't check the photo. Please try again.");
+    } finally {
+      setBusy(false); // always runs, so the button never stays stuck on "Checking…"
+    }
   }
 
   function addSteps() {
@@ -182,10 +218,10 @@ export default function Home() {
     lastPoint.current = { lat, lng, t };
     if (seconds <= 0 || d / seconds > 3.5) return; // too fast to be walking (bus, car)
 
-    const steps = d / STEP_LENGTH_M;
+    const walked = d / STEP_LENGTH_M;
     setSessionM((m) => m + d);
-    sessionSteps.current += steps;
-    spareSteps.current += steps;
+    sessionSteps.current += walked;
+    spareSteps.current += walked;
     const stepsPerXp = XP.stepsPer / XP.stepXp; // 100 steps = 1 XP
     const gained = Math.floor(spareSteps.current / stepsPerXp);
     if (gained > 0) {
@@ -223,6 +259,7 @@ export default function Home() {
     setTracking(true);
     try {
       // keep the screen on, because tracking pauses when the phone sleeps
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       wakeLock.current = await (navigator as any).wakeLock?.request("screen");
     } catch {}
   }
@@ -275,10 +312,12 @@ export default function Home() {
         </ol>
       </section>
 
+      {notice && <p className="muted notice" role="status">{notice}</p>}
+
       <section className="actions">
         <article>
-          <h3>Clean up litter</h3>
-          <p>Photograph what you collected. The AI counts it and gives XP.</p>
+          <h3>Spot litter</h3>
+          <p>Photograph litter you spot. The AI checks it and gives XP.</p>
           <PhotoButton label="Take photo" busy={busy} onFile={(f) => analyse("litter", f)} />
         </article>
 
@@ -330,4 +369,4 @@ export default function Home() {
       </section>
     </main>
   );
-}1
+}
