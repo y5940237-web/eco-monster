@@ -2,7 +2,8 @@
 import { useEffect, useRef, useState } from "react";
 import Hotspots from "./Hotspots";
 import { distanceM } from "./lib/geo";
-
+import AuthGate from "./AuthGate";
+import { supabase } from "./lib/supabase";
 type Stage = { name: string; at: number; face: string; note: string };
 type LogEntry = { id: number; text: string; points: number };
 type Kind = "litter" | "refund";
@@ -122,7 +123,7 @@ function PhotoButton({ label, busy, onFile }: { label: string; busy: boolean; on
   );
 }
 
-export default function Home() {
+function Home({ userId, onSignOut }: { userId: string; onSignOut: () => void }) {
   const [xp, setXp] = useState<number>(0);
   const [log, setLog] = useState<LogEntry[]>([]);
   const [steps, setSteps] = useState<string>("");
@@ -150,14 +151,25 @@ export default function Home() {
     setLoaded(true);
   }, []);
 
-  useEffect(() => {
-    if (loaded) localStorage.setItem("eco-monster", JSON.stringify({ xp, log }));
-  }, [xp, log, loaded]);
+useEffect(() => {
+  (async () => {
+    const { data: p } = await supabase.from("profiles").select("xp").eq("id", userId).single();
+    const { data: a } = await supabase
+      .from("activity").select("id,label,points")
+      .eq("user_id", userId).order("created_at", { ascending: false }).limit(8);
+    setXp(p?.xp ?? 0);
+    setLog((a ?? []).map((r) => ({ id: r.id, text: r.label, points: r.points })));
+  })();
+}, [userId]);
 
-  function earn(points: number, text: string) {
-    setXp((x) => x + points);
-    setLog((l) => [{ text, points, id: Date.now() }, ...l].slice(0, 8));
-  }
+function earn(points: number, text: string) {
+  if (points < 1) return;
+  setXp((x) => x + points);
+  setLog((l) => [{ text, points, id: Date.now() }, ...l].slice(0, 8));
+  supabase.rpc("add_xp", { p_points: points, p_label: text }).then(({ error }) => {
+    if (error) console.error(error);
+  });
+}
 
   async function analyse(kind: Kind, file: File) {
     setBusy(true);
@@ -270,13 +282,15 @@ export default function Home() {
     wakeLock.current?.release().catch(() => {});
     wakeLock.current = null;
     setTracking(false);
-    if (sessionXp.current > 0) {
-      const text = `Walked ${Math.round(sessionSteps.current).toLocaleString()} steps (GPS)`;
-      setLog((l) => [{ text, points: sessionXp.current, id: Date.now() }, ...l].slice(0, 8));
-    }
-    sessionXp.current = 0;
+    const gainedXp = sessionXp.current;
+if (gainedXp > 0) {
+  const text = `Walked ${Math.round(sessionSteps.current).toLocaleString()} steps (GPS)`;
+  setLog((l) => [{ text, points: gainedXp, id: Date.now() }, ...l].slice(0, 8));
+  supabase.rpc("add_xp", { p_points: gainedXp, p_label: text }).then(({ error }) => {
+    if (error) console.error(error);
+  });
+}
   }
-
   useEffect(() => () => {
     if (watchId.current !== null) navigator.geolocation.clearWatch(watchId.current);
   }, []);
@@ -365,8 +379,15 @@ export default function Home() {
             ))}
           </ul>
         )}
-        <button className="link" onClick={() => { setXp(0); setLog([]); }}>Reset progress</button>
+        <button className="link" onClick={onSignOut}>Sign out</button>
       </section>
     </main>
+  );
+}
+export default function Page() {
+  return (
+    <AuthGate>
+      {(user, signOut) => <Home userId={user.id} onSignOut={signOut} />}
+    </AuthGate>
   );
 }

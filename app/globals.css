@@ -93,3 +93,9 @@ summary { cursor: pointer; margin-bottom: 8px; }
 .routebox h4 { margin: 0 0 4px; }
 .routebox p { margin: 0 0 10px; }
 .routebox .btn.alt { background: transparent; color: #fff; border-color: #7fe09a; }
+/* Login */
+.auth-loading { text-align: center; padding: 48px 16px; }
+.auth { background: #fff; border-radius: 24px; padding: 24px 20px; display: flex; flex-direction: column; gap: 12px; max-width: 420px; margin: 0 auto; text-align: center; }
+.auth h2 { margin: 0; }
+.auth-egg { font-size: 4rem; animation: bob 2.4s ease-in-out infinite; }
+.auth input { font: inherit; padding: 12px; border: 2px solid #cfe5d6; border-radius: 12px; }
