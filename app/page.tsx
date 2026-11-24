@@ -1,28 +1,39 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import Hotspots from "./Hotspots";
-import { distanceM } from "./lib/geo";
 import AuthGate from "./AuthGate";
+import Hotspots from "./Hotspots";
+import HydraStudio from "./HydraStudio";
+import { HydraLook } from "./hydraArt";
+import { Monster, ChooseMonster } from "./Monster";
+import { ELEMENTS, Element } from "./monsterArt";
+import { distanceM } from "./lib/geo";
 import { supabase } from "./lib/supabase";
-type Stage = { name: string; at: number; face: string; note: string };
+
+type Stage = { name: string; at: number; note: string };
 type LogEntry = { id: number; text: string; points: number };
 type Kind = "litter" | "refund";
 
 // XP needed to reach each stage
 const STAGES: Stage[] = [
-  { name: "Egg", at: 0, face: "🥚", note: "Waiting to hatch" },
-  { name: "Hatch", at: 100, face: "🐣", note: "Baby sprout" },
-  { name: "Evolve", at: 500, face: "🌿", note: "Leaf warrior" },
-  { name: "Guardian", at: 1500, face: "🐉", note: "Final evolution" },
+  { name: "Egg", at: 0, note: "Waiting to hatch" },
+  { name: "Hatch", at: 100, note: "Baby monster" },
+  { name: "Evolve", at: 500, note: "Growing strong" },
+  { name: "Guardian", at: 1500, note: "Final evolution" },
 ];
 
 const XP = { litter: 20, refundPerDollar: 100, stepsPer: 1000, stepXp: 10 };
-
+const MAX_MANUAL_STEPS = 30000; // 300 XP, well under the database limit
 const STEP_LENGTH_M = 0.75; // average walking step, in metres
 
-function stageFor(xp: number): number {
+// The secret Hydra needs double the XP of a normal monster
+const HYDRA_AT = [0, 300, 1200, 3000];
+function stagesFor(el: Element): Stage[] {
+  return el === "hydra" ? STAGES.map((s, i) => ({ ...s, at: HYDRA_AT[i] })) : STAGES;
+}
+
+function stageFor(xp: number, stages: Stage[]): number {
   let i = 0;
-  STAGES.forEach((s, n) => {
+  stages.forEach((s, n) => {
     if (xp >= s.at) i = n;
   });
   return i;
@@ -128,8 +139,13 @@ function Home({ userId, onSignOut }: { userId: string; onSignOut: () => void }) 
   const [log, setLog] = useState<LogEntry[]>([]);
   const [steps, setSteps] = useState<string>("");
   const [busy, setBusy] = useState<boolean>(false);
-  const [loaded, setLoaded] = useState<boolean>(false);
   const [notice, setNotice] = useState<string>(""); // message after the AI checks a photo
+  const [element, setElement] = useState<Element | null | undefined>(undefined); // undefined = still loading
+  const [startXp, setStartXp] = useState<number>(0); // total XP when the current egg was chosen
+  const [guardians, setGuardians] = useState<{ element: Element; look: HydraLook | null }[]>([]); // finished monsters
+  const [hydraLook, setHydraLook] = useState<HydraLook | null>(null); // the current hydra's design
+  const [customizing, setCustomizing] = useState<boolean>(false);
+  const [picking, setPicking] = useState<boolean>(false); // choosing the next egg
 
   // GPS walk tracking
   const [tracking, setTracking] = useState<boolean>(false);
@@ -142,34 +158,81 @@ function Home({ userId, onSignOut }: { userId: string; onSignOut: () => void }) 
   const sessionSteps = useRef<number>(0);
   const wakeLock = useRef<{ release: () => Promise<void> } | null>(null);
 
+  // Load XP, monster element and recent activity from Supabase
   useEffect(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem("eco-monster") || "{}");
-      setXp(saved.xp || 0);
-      setLog(saved.log || []);
-    } catch {}
-    setLoaded(true);
-  }, []);
+    (async () => {
+      const { data: p, error: pErr } = await supabase
+        .from("profiles").select("xp, element, monster_start_xp, hydra_look").eq("id", userId).maybeSingle();
+      if (pErr) {
+        console.error("load profile:", pErr.message, pErr.code);
+        setNotice("Couldn't load your progress. Please refresh.");
+        return;
+      }
+      const { data: a, error: aErr } = await supabase
+        .from("activity").select("id,label,points")
+        .eq("user_id", userId).order("created_at", { ascending: false }).limit(8);
+      if (aErr) console.error("load activity:", aErr.message, aErr.code);
 
-useEffect(() => {
-  (async () => {
-    const { data: p } = await supabase.from("profiles").select("xp").eq("id", userId).single();
-    const { data: a } = await supabase
-      .from("activity").select("id,label,points")
-      .eq("user_id", userId).order("created_at", { ascending: false }).limit(8);
-    setXp(p?.xp ?? 0);
-    setLog((a ?? []).map((r) => ({ id: r.id, text: r.label, points: r.points })));
-  })();
-}, [userId]);
+      const { data: g } = await supabase
+        .from("guardians").select("element, look").eq("user_id", userId).order("completed_at", { ascending: true });
 
-function earn(points: number, text: string) {
-  if (points < 1) return;
-  setXp((x) => x + points);
-  setLog((l) => [{ text, points, id: Date.now() }, ...l].slice(0, 8));
-  supabase.rpc("add_xp", { p_points: points, p_label: text }).then(({ error }) => {
-    if (error) console.error(error);
-  });
-}
+      setXp(p?.xp ?? 0);
+      setStartXp(p?.monster_start_xp ?? 0);
+      setGuardians((g ?? []).map((r) => ({ element: r.element as Element, look: (r.look as HydraLook | null) ?? null })));
+      setHydraLook((p?.hydra_look as HydraLook | null) ?? null);
+      setElement((p?.element as Element | null) ?? null);
+      setLog((a ?? []).map((r) => ({ id: r.id, text: r.label, points: r.points })));
+    })();
+  }, [userId]);
+
+  // Save to Supabase first, then update the screen
+  async function earn(points: number, text: string) {
+    if (points < 1) return;
+    const { error } = await supabase.rpc("add_xp", { p_points: points, p_label: text });
+    if (error) {
+      console.error("add_xp:", error.message, error.code);
+      setNotice("Couldn't save your XP. Please try again.");
+      return;
+    }
+    setXp((x) => x + points);
+    setLog((l) => [{ text, points, id: Date.now() }, ...l].slice(0, 8));
+  }
+
+  async function pickElement(el: Element): Promise<boolean> {
+    const { data, error } = await supabase.rpc("choose_element", { p_element: el });
+    if (error) {
+      console.error("choose_element:", error.message);
+      return false;
+    }
+    setElement(data as Element);
+    return true;
+  }
+
+  // After the final form: save the finished monster and start a new egg
+  async function hatchNew(el: Element): Promise<boolean> {
+    const { data, error } = await supabase.rpc("hatch_new_egg", { p_element: el });
+    if (error) {
+      console.error("hatch_new_egg:", error.message);
+      return false;
+    }
+    if (element) setGuardians((g) => [...g, { element, look: hydraLook }]);
+    setStartXp(data as number);
+    setHydraLook(null);
+    setElement(el);
+    setPicking(false);
+    return true;
+  }
+
+  async function saveLook(look: HydraLook): Promise<boolean> {
+    const { error } = await supabase.rpc("save_hydra_look", { p_look: look });
+    if (error) {
+      console.error("save_hydra_look:", error.message);
+      return false;
+    }
+    setHydraLook(look);
+    setCustomizing(false);
+    return true;
+  }
 
   async function analyse(kind: Kind, file: File) {
     setBusy(true);
@@ -192,12 +255,12 @@ function earn(points: number, text: string) {
 
       if (kind === "litter") {
         const count = Math.min(Math.max(Number(data.count) || 1, 1), 10); // 1 to 10, stops cheating
-        earn(count * XP.litter, `Spotted ${count} × ${data.type ?? "litter"}`);
+        await earn(count * XP.litter, `Spotted ${count} × ${data.type ?? "litter"}`);
         setNotice(`✅ ${data.reason}`);
       }
       if (kind === "refund") {
         const amount = Math.min(Math.max(Number(data.amount) || 0, 0), 20); // cap unrealistic amounts
-        earn(Math.round(amount * XP.refundPerDollar), `Recycled, refund $${amount.toFixed(2)}`);
+        await earn(Math.round(amount * XP.refundPerDollar), `Recycled, refund $${amount.toFixed(2)}`);
         setNotice(`✅ ${data.reason}`);
       }
     } catch (err) {
@@ -211,7 +274,17 @@ function earn(points: number, text: string) {
   function addSteps() {
     const n = parseInt(steps, 10);
     if (!n || n < 0) return;
-    earn(Math.floor(n / XP.stepsPer) * XP.stepXp, `Walked ${n.toLocaleString()} steps`);
+    if (n > MAX_MANUAL_STEPS) {
+      setNotice(`Please enter ${MAX_MANUAL_STEPS.toLocaleString()} steps or fewer at a time.`);
+      return;
+    }
+    const gained = Math.floor(n / XP.stepsPer) * XP.stepXp;
+    if (gained < 1) {
+      setNotice(`Walk at least ${XP.stepsPer.toLocaleString()} steps to earn XP.`);
+      return;
+    }
+    setNotice("");
+    earn(gained, `Walked ${n.toLocaleString()} steps`);
     setSteps("");
   }
 
@@ -239,7 +312,7 @@ function earn(points: number, text: string) {
     if (gained > 0) {
       spareSteps.current -= gained * stepsPerXp;
       sessionXp.current += gained;
-      setXp((x) => x + gained);
+      setXp((x) => x + gained); // shown live, saved to Supabase when tracking stops
     }
   }
 
@@ -282,22 +355,43 @@ function earn(points: number, text: string) {
     wakeLock.current?.release().catch(() => {});
     wakeLock.current = null;
     setTracking(false);
+
     const gainedXp = sessionXp.current;
-if (gainedXp > 0) {
-  const text = `Walked ${Math.round(sessionSteps.current).toLocaleString()} steps (GPS)`;
-  setLog((l) => [{ text, points: gainedXp, id: Date.now() }, ...l].slice(0, 8));
-  supabase.rpc("add_xp", { p_points: gainedXp, p_label: text }).then(({ error }) => {
-    if (error) console.error(error);
-  });
-}
+    if (gainedXp > 0) {
+      const text = `Walked ${Math.round(sessionSteps.current).toLocaleString()} steps (GPS)`;
+      setLog((l) => [{ text, points: gainedXp, id: Date.now() }, ...l].slice(0, 8));
+      supabase.rpc("add_xp", { p_points: gainedXp, p_label: text }).then(({ error }) => {
+        if (error) console.error("add_xp:", error.message, error.code);
+      });
+    }
+    sessionXp.current = 0;
   }
+
   useEffect(() => () => {
     if (watchId.current !== null) navigator.geolocation.clearWatch(watchId.current);
   }, []);
 
-  const stage = stageFor(xp);
-  const next: Stage | undefined = STAGES[stage + 1];
-  const pct = next ? ((xp - STAGES[stage].at) / (next.at - STAGES[stage].at)) * 100 : 100;
+  const progress = Math.max(0, xp - startXp); // XP on the current monster
+  const stages = stagesFor(element ?? "fire");
+  const stage = stageFor(progress, stages);
+  const next: Stage | undefined = stages[stage + 1];
+  const pct = next ? ((progress - stages[stage].at) / (next.at - stages[stage].at)) * 100 : 100;
+
+  // Still loading, or the player has not picked an element yet
+  if (element === undefined) return <p className="muted auth-loading">{notice || "Loading…"}</p>;
+  if (element === null) return <ChooseMonster onPick={pickElement} />;
+  if (element === "hydra" && (hydraLook === null || customizing))
+    return <HydraStudio initial={hydraLook} onSave={saveLook} onCancel={hydraLook ? () => setCustomizing(false) : undefined} />;
+  if (picking)
+    return (
+      <ChooseMonster
+        heading="Choose your next egg"
+        intro="Your Guardian is safe in the hall. Pick the element of your next monster."
+        guardians={[...guardians, { element, look: hydraLook }]}
+        onPick={hatchNew}
+        onCancel={() => setPicking(false)}
+      />
+    );
 
   return (
     <main className="wrap">
@@ -307,24 +401,37 @@ if (gainedXp > 0) {
       </header>
 
       <section className="monster" aria-live="polite">
-        <div className={`face stage-${stage}`}>{STAGES[stage].face}</div>
-        <h2>{STAGES[stage].name}</h2>
-        <p className="muted">{STAGES[stage].note}</p>
+        <div className="face"><Monster element={element} stage={stage} look={hydraLook} size={190} /></div>
+        <h2>{ELEMENTS[element].names[stage]}</h2>
+        <p className="muted">{stages[stage].note}</p>
         <div className="bar" role="progressbar" aria-valuenow={Math.round(pct)} aria-valuemin={0} aria-valuemax={100}>
           <div style={{ width: `${pct}%` }} />
         </div>
         <p className="xp">
-          {xp} XP{next ? ` · ${next.at - xp} XP to ${next.name}` : " · Max level"}
+          {progress} XP{next ? ` · ${next.at - progress} XP to the next evolution` : " · Fully grown"}
         </p>
         <ol className="path">
-          {STAGES.map((s, i) => (
+          {stages.map((s, i) => (
             <li key={s.name} className={i <= stage ? "on" : ""}>
-              {s.face}
-              <span>{s.name}</span>
+              {i <= stage ? (
+                <Monster element={element} stage={i} look={hydraLook} size={44} />
+              ) : (
+                <span className="mystery" aria-label="Not discovered yet">?</span>
+              )}
+              <span>{i <= stage ? s.name : "???"}</span>
             </li>
           ))}
         </ol>
+        {element === "hydra" && <button className="link" onClick={() => setCustomizing(true)}>Customize your Hydra</button>}
       </section>
+
+      {stage === stages.length - 1 && (
+        <section className="grown">
+          <h3>Fully grown!</h3>
+          <p>Your {ELEMENTS[element].names[3]} is a Guardian now. Ready for a new adventure?</p>
+          <button className="btn" onClick={() => setPicking(true)}>Hatch a new egg</button>
+        </section>
+      )}
 
       {notice && <p className="muted notice" role="status">{notice}</p>}
 
@@ -358,7 +465,7 @@ if (gainedXp > 0) {
           <details>
             <summary>Enter steps manually</summary>
             <div className="row">
-              <input type="number" min="0" inputMode="numeric" placeholder="e.g. 5000"
+              <input type="number" min="0" max={MAX_MANUAL_STEPS} inputMode="numeric" placeholder="e.g. 5000"
                 value={steps} onChange={(e) => setSteps(e.target.value)} aria-label="Steps walked" />
               <button className="btn" onClick={addSteps}>Add steps</button>
             </div>
@@ -367,6 +474,20 @@ if (gainedXp > 0) {
       </section>
 
       <Hotspots />
+
+      {guardians.length > 0 && (
+        <section className="hall">
+          <h3>Guardian hall</h3>
+          <div className="hall-row">
+            {guardians.map((g, i) => (
+              <div key={i} className={g.element === "hydra" ? "gold" : ""}>
+                <Monster element={g.element} stage={3} look={g.look} size={84} />
+                <small>{ELEMENTS[g.element].names[3]}</small>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section className="history">
         <h3>Recent activity</h3>
@@ -384,6 +505,8 @@ if (gainedXp > 0) {
     </main>
   );
 }
+
+// Shows the login screen first, then the game
 export default function Page() {
   return (
     <AuthGate>

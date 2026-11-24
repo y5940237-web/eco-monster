@@ -99,3 +99,7 @@ summary { cursor: pointer; margin-bottom: 8px; }
 .auth h2 { margin: 0; }
 .auth-egg { font-size: 4rem; animation: bob 2.4s ease-in-out infinite; }
 .auth input { font: inherit; padding: 12px; border: 2px solid #cfe5d6; border-radius: 12px; }
+/* Fonts for the egg names and descriptions */
+.choice b { font-family: var(--font-display), system-ui, sans-serif; font-weight: 400; font-size: 1.2rem; letter-spacing: .5px; }
+.choice small, .choice .tag, .evo small, .secret-note { font-family: var(--font-body), system-ui, sans-serif; font-weight: 600; }
+.choice small { font-size: .85rem; }
